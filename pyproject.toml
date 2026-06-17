@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polymarket-research-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared logic for Polymarket research projects: data access, models, edge math, notes."
 readme = "README.md"
 requires-python = ">=3.11"

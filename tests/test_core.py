@@ -1,7 +1,18 @@
 """Unit tests for the shared core (no network)."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from polymarket_research_core.edge import compute_edge
+from polymarket_research_core.evoi import SourceOption, evoi_decision, spend_saved
+from polymarket_research_core.scoring import (
+    Snapshot,
+    brier_score,
+    build_scorecard,
+    lead_time_hours,
+    log_loss,
+    score_market,
+)
 from polymarket_research_core.models import (
     Evidence,
     Market,
@@ -71,3 +82,66 @@ def test_render_markdown():
 def test_market_yes_price_property():
     m = Market(id="1", slug="s", question="q", market_prices={"Yes": 0.55})
     assert m.yes_price == 0.55
+
+
+# --------------------------------------------------------------------------- #
+# Phase 0 — scoring
+# --------------------------------------------------------------------------- #
+def test_brier_and_logloss_perfect_vs_wrong():
+    assert brier_score(1.0, 1) == 0.0
+    assert brier_score(0.0, 1) == 1.0
+    # confident-and-wrong is punished far harder by log-loss than by Brier
+    assert log_loss(0.99, 0) > log_loss(0.5, 0) > log_loss(0.01, 0)
+
+
+def _snap(ts, mp, px, mid="1"):
+    return Snapshot(market_id=mid, ts=ts, model_prob=mp, market_price=px)
+
+
+def test_score_market_uses_final_snapshot():
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    snaps = [
+        _snap(t0, 0.40, 0.50),
+        _snap(t0 + timedelta(hours=6), 0.80, 0.55),  # final estimate
+    ]
+    s = score_market(snaps, outcome=1)
+    assert s.final_model_prob == 0.80 and s.n_snapshots == 2
+    assert s.brier_model < s.brier_market          # 0.80 beats 0.55 for a YES
+
+
+def test_lead_time_agent_earlier_is_positive():
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    snaps = [
+        _snap(t0, 0.70, 0.40),                       # agent already on YES, market not
+        _snap(t0 + timedelta(hours=10), 0.75, 0.65), # market crosses to YES later
+    ]
+    lt = lead_time_hours(snaps, outcome=1)
+    assert lt == 10.0
+
+
+def test_build_scorecard_skill_score():
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    # model nails both; market is mediocre -> positive skill score, 100% win rate
+    a = score_market([_snap(t0, 0.9, 0.6, "a")], outcome=1)
+    b = score_market([_snap(t0, 0.1, 0.4, "b")], outcome=0)
+    card = build_scorecard([a, b])
+    assert card.n_resolved == 2
+    assert card.win_rate_vs_market == 1.0
+    assert card.brier_skill_score is not None and card.brier_skill_score > 0
+    assert len(card.calibration) == 10
+
+
+# --------------------------------------------------------------------------- #
+# Phase 0 — EVOI shadow
+# --------------------------------------------------------------------------- #
+def test_evoi_buys_when_value_exceeds_price():
+    opt = SourceOption(source="noaa", price_usd=0.40, expected_info_gain=0.3)
+    d = evoi_decision(opt, stake_at_risk_usd=10.0, market_id="m")
+    assert d.decision == "BUY" and d.evoi_value == 3.0
+
+
+def test_evoi_skips_and_spend_saved():
+    opt = SourceOption(source="exa.search.web", price_usd=0.50, expected_info_gain=0.02)
+    d = evoi_decision(opt, stake_at_risk_usd=5.0, market_id="m")
+    assert d.decision == "SKIP"
+    assert spend_saved([d]) == 0.50
